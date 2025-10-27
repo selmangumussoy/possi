@@ -11,6 +11,9 @@
         private Button btnConnectHub;
         private Label lblStatus;
 
+        // ✅ DB için sadece ayar butonu
+        private Button btnDbSettings;
+
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null))
@@ -27,6 +30,8 @@
             this.btnLogin = new Button();
             this.btnConnectHub = new Button();
             this.lblStatus = new Label();
+            this.btnDbSettings = new Button();
+
             this.SuspendLayout();
             // 
             // txtBaseUrl
@@ -74,9 +79,16 @@
             this.lblStatus.Size = new Size(300, 50);
             this.lblStatus.Text = "Durum: Bekleniyor...";
             // 
+            // btnDbSettings
+            // 
+            this.btnDbSettings.Location = new Point(20, 280);
+            this.btnDbSettings.Size = new Size(300, 30);
+            this.btnDbSettings.Text = "⚙️ DB Ayarları";
+            this.btnDbSettings.Click += new EventHandler(this.btnDbSettings_Click);
+            // 
             // Form1
             // 
-            this.ClientSize = new Size(360, 300);
+            this.ClientSize = new Size(360, 350);
             this.Controls.Add(this.txtBaseUrl);
             this.Controls.Add(this.txtWebEmail);
             this.Controls.Add(this.txtWebPassword);
@@ -84,6 +96,8 @@
             this.Controls.Add(this.btnLogin);
             this.Controls.Add(this.btnConnectHub);
             this.Controls.Add(this.lblStatus);
+            this.Controls.Add(this.btnDbSettings);
+
             this.Text = "OrderHub Client";
             this.ResumeLayout(false);
             this.PerformLayout();
