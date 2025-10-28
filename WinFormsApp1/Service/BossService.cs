@@ -1,13 +1,11 @@
 ﻿using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using Microsoft.Data.SqlClient;
 
 namespace WinFormsApp1.Service
 {
     public static class BossService
     {
-        // Form1'de switch'in çağırdığı tek giriş noktası
+        // Request yönlendirme
         public static HubMessage HandleRequest(HubMessage request)
         {
             switch (request.MessageRequestCode)
@@ -29,103 +27,288 @@ namespace WinFormsApp1.Service
             }
         }
 
-        // --- Handlers (şimdilik dummy, gerçek veriyle değiştir) ---
-
+        // Gün Sonu Özeti
         private static HubMessage HandleGunSonuOzet(HubMessage request)
         {
-            var prm  = request.GetMessageParams();
-            var bas  = DateTime.Parse(prm.First(p => p.ParamName == "bastarih").ParamValue);
-            var son  = DateTime.Parse(prm.First(p => p.ParamName == "sontarih").ParamValue);
+            var prm = request.GetMessageParams();
+            
+            // Web'den gelen: StartDate ve EndDate
+            // Eski kod: bastarih ve sontarih (case insensitive)
+            var basStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("StartDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("bastarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
+            
+            var sonStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("EndDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("sontarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
 
-            var ozet = new[]
+            if (string.IsNullOrEmpty(basStr) || string.IsNullOrEmpty(sonStr))
             {
-                new { Tarih = bas.ToString("yyyy-MM-dd"), Toplam = 1234.56m },
-                new { Tarih = son.ToString("yyyy-MM-dd"), Toplam = 2345.67m }
-            };
+                return BuildErr(request, "StartDate ve EndDate parametreleri gereklidir.");
+            }
 
-            return BuildRes(request, ozet);
+            var bas = DateTime.Parse(basStr);
+            var son = DateTime.Parse(sonStr);
+
+
+            var result = new List<object>();
+
+            try
+            {
+                using var conn = new SqlConnection(AppSession.DbConnectionString);
+                conn.Open();
+
+                string sql = @"
+                    SELECT CAST(DeliveryTime AS DATE) AS Tarih, SUM(OrderTotal) AS Toplam
+                    FROM ys_Orders
+                    WHERE DeliveryTime BETWEEN @Bas AND @Son
+                      AND StatusId = 12 -- Kapalı siparişler
+                    GROUP BY CAST(DeliveryTime AS DATE)
+                    ORDER BY Tarih;";
+
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@Bas", bas);
+                cmd.Parameters.AddWithValue("@Son", son);
+
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    result.Add(new
+                    {
+                        Tarih = ((DateTime)rdr["Tarih"]).ToString("yyyy-MM-dd"),
+                        Toplam = Convert.ToDecimal(rdr["Toplam"])
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                return BuildErr(request, $"DB Hatası: {ex.Message}");
+            }
+
+            return BuildRes(request, result);
         }
 
+        // Satışlar (Ürün bazlı)
         private static HubMessage HandleSatislar(HubMessage request)
         {
             var prm = request.GetMessageParams();
-            var bas = DateTime.Parse(prm.First(p => p.ParamName == "bastarih").ParamValue);
-            var son = DateTime.Parse(prm.First(p => p.ParamName == "sontarih").ParamValue);
+            
+            var basStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("StartDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("bastarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
+            
+            var sonStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("EndDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("sontarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
+
+            if (string.IsNullOrEmpty(basStr) || string.IsNullOrEmpty(sonStr))
+            {
+                return BuildErr(request, "StartDate ve EndDate parametreleri gereklidir.");
+            }
+
+            var bas = DateTime.Parse(basStr);
+            var son = DateTime.Parse(sonStr);
+
+
+            var detayList = new List<object>();
+            decimal toplam = 0;
+
+            try
+            {
+                using var conn = new SqlConnection(AppSession.DbConnectionString);
+                conn.Open();
+
+                string sql = @"
+                    SELECT op.Name AS Urun, SUM(op.Quantity) AS Adet, SUM(op.Price) AS Tutar
+                    FROM ys_Orders o
+                    INNER JOIN ys_OrderProducts op ON o.Id = op.OrderId
+                    WHERE o.DeliveryTime BETWEEN @Bas AND @Son
+                      AND o.StatusId = 12 -- Kapalı siparişler
+                    GROUP BY op.Name
+                    ORDER BY Tutar DESC;";
+
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@Bas", bas);
+                cmd.Parameters.AddWithValue("@Son", son);
+
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    detayList.Add(new
+                    {
+                        Urun = rdr["Urun"].ToString(),
+                        Adet = Convert.ToInt32(rdr["Adet"]),
+                        Tutar = Convert.ToDecimal(rdr["Tutar"])
+                    });
+                }
+
+                // Toplam
+                string sqlTotal = @"
+                    SELECT SUM(OrderTotal) 
+                    FROM ys_Orders
+                    WHERE DeliveryTime BETWEEN @Bas AND @Son
+                      AND StatusId = 12;";
+
+                using var cmd2 = new SqlCommand(sqlTotal, conn);
+                cmd2.Parameters.AddWithValue("@Bas", bas);
+                cmd2.Parameters.AddWithValue("@Son", son);
+
+                toplam = Convert.ToDecimal(cmd2.ExecuteScalar() ?? 0);
+            }
+            catch (Exception ex)
+            {
+                return BuildErr(request, $"DB Hatası: {ex.Message}");
+            }
 
             var satislar = new
             {
-                SatisDetaylari = new[]
-                {
-                    new { Urun = "Hamburger", Adet = 10, Tutar = 1200m },
-                    new { Urun = "Pizza",     Adet =  7, Tutar = 1400m },
-                },
-                Dukkan = 1800m,
-                Paket  = 500m,
-                Online = 300m,
-                Toplam = 2600m
+                SatisDetaylari = detayList,
+                Toplam = toplam
             };
 
             return BuildRes(request, satislar);
         }
 
+        // Açık Satışlar
         private static HubMessage HandleAcikSatislar(HubMessage request)
         {
             var prm = request.GetMessageParams();
-            var bas = DateTime.Parse(prm.First(p => p.ParamName == "bastarih").ParamValue);
-            var son = DateTime.Parse(prm.First(p => p.ParamName == "sontarih").ParamValue);
+            
+            var basStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("StartDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("bastarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
+            
+            var sonStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("EndDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("sontarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
 
-            var acik = new[]
+            if (string.IsNullOrEmpty(basStr) || string.IsNullOrEmpty(sonStr))
             {
-                new { MasaNo = "A1", Tutar = 250m, Tarih = bas.ToString("yyyy-MM-dd") },
-                new { MasaNo = "B3", Tutar = 300m, Tarih = son.ToString("yyyy-MM-dd") }
-            };
+                return BuildErr(request, "StartDate ve EndDate parametreleri gereklidir.");
+            }
+
+            var bas = DateTime.Parse(basStr);
+            var son = DateTime.Parse(sonStr);
+
+
+            var acik = new List<object>();
+
+            try
+            {
+                using var conn = new SqlConnection(AppSession.DbConnectionString);
+                conn.Open();
+
+                string sql = @"
+                    SELECT MasaKodu, OrderTotal, CAST(DeliveryTime AS DATE) AS Tarih
+                    FROM ys_Orders
+                    WHERE DeliveryTime BETWEEN @Bas AND @Son
+                      AND StatusId = 4; -- Açık siparişler";
+
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@Bas", bas);
+                cmd.Parameters.AddWithValue("@Son", son);
+
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    acik.Add(new
+                    {
+                        MasaNo = rdr["MasaKodu"].ToString(),
+                        Tutar = Convert.ToDecimal(rdr["OrderTotal"]),
+                        Tarih = ((DateTime)rdr["Tarih"]).ToString("yyyy-MM-dd")
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                return BuildErr(request, $"DB Hatası: {ex.Message}");
+            }
 
             return BuildRes(request, acik);
         }
 
+        // Online Sipariş Özeti
         private static HubMessage HandleOnlineSiparisOzet(HubMessage request)
         {
             var prm = request.GetMessageParams();
-            var bas = DateTime.Parse(prm.First(p => p.ParamName == "bastarih").ParamValue);
-            var son = DateTime.Parse(prm.First(p => p.ParamName == "sontarih").ParamValue);
+            
+            var basStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("StartDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("bastarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
+            
+            var sonStr = prm.FirstOrDefault(p => 
+                p.ParamName.Equals("EndDate", StringComparison.OrdinalIgnoreCase) ||
+                p.ParamName.Equals("sontarih", StringComparison.OrdinalIgnoreCase))?.ParamValue;
 
-            var ozet = new[]
+            if (string.IsNullOrEmpty(basStr) || string.IsNullOrEmpty(sonStr))
             {
-                new { Kanal = "Getir",   Siparis = 12, Tutar = 900m },
-                new { Kanal = "Yemeksepeti", Siparis = 9, Tutar = 720m }
-            };
+                return BuildErr(request, "StartDate ve EndDate parametreleri gereklidir.");
+            }
+
+            var bas = DateTime.Parse(basStr);
+            var son = DateTime.Parse(sonStr);
+
+
+            var ozet = new List<object>();
+
+            try
+            {
+                using var conn = new SqlConnection(AppSession.DbConnectionString);
+                conn.Open();
+
+                string sql = @"
+                    SELECT ProviderCode AS Kanal, COUNT(Id) AS Siparis, SUM(OrderTotal) AS Tutar
+                    FROM ys_Orders
+                    WHERE DeliveryTime BETWEEN @Bas AND @Son
+                      AND StatusId = 12
+                    GROUP BY ProviderCode;";
+
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@Bas", bas);
+                cmd.Parameters.AddWithValue("@Son", son);
+
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    ozet.Add(new
+                    {
+                        Kanal = rdr["Kanal"].ToString(),
+                        Siparis = Convert.ToInt32(rdr["Siparis"]),
+                        Tutar = Convert.ToDecimal(rdr["Tutar"])
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                return BuildErr(request, $"DB Hatası: {ex.Message}");
+            }
 
             return BuildRes(request, ozet);
         }
 
-        // --- Helpers ---
-
-        private static HubMessage BuildRes(HubMessage req, object body)
-        {
-            return new HubMessage
+        // Helper metotlar
+        private static HubMessage BuildRes(HubMessage req, object body) =>
+            new HubMessage
             {
-                MessageFromUser    = req.MessageToUser,
-                MessageToUser      = req.MessageFromUser,
-                MessageType        = "RES",
+                MessageFromUser = req.MessageToUser,
+                MessageToUser = req.MessageFromUser,
+                MessageType = "RES",
                 MessageRequestCode = req.MessageRequestCode,
-                MessageSubject     = req.MessageSubject,
-                MessageParams      = req.MessageParams,
-                MessageBody        = JsonConvert.SerializeObject(body)
+                MessageSubject = req.MessageSubject,
+                MessageParams = req.MessageParams,
+                MessageBody = JsonConvert.SerializeObject(body)
             };
-        }
 
-        private static HubMessage BuildErr(HubMessage req, string error)
-        {
-            return new HubMessage
+        private static HubMessage BuildErr(HubMessage req, string error) =>
+            new HubMessage
             {
-                MessageFromUser    = req.MessageToUser,
-                MessageToUser      = req.MessageFromUser,
-                MessageType        = "ERR",
+                MessageFromUser = req.MessageToUser,
+                MessageToUser = req.MessageFromUser,
+                MessageType = "ERR",
                 MessageRequestCode = req.MessageRequestCode,
-                MessageSubject     = "Boss hata",
-                MessageParams      = req.MessageParams,
-                MessageBody        = error
+                MessageSubject = "Boss hata",
+                MessageParams = req.MessageParams,
+                MessageBody = error
             };
-        }
     }
 }
